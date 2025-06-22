@@ -24,7 +24,7 @@ class WordData:
 def get_gini(balances_list):
     if not isinstance(balances_list, list) or not balances_list or len(balances_list) < 2: return 0.0
     balances = np.sort(np.array(balances_list, dtype=float)); balances = np.maximum(balances, 0)
-    n = len(balances);
+    n = len(balances)
     if n == 0: return 0.0
     index = np.arange(1, n + 1); sum_balances = np.sum(balances)
     if sum_balances == 0: return 0.0
