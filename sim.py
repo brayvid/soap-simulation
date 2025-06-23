@@ -640,18 +640,19 @@ if __name__ == "__main__":
         'SIMULATION_STEPS': 240,
         'INITIAL_USER_BALANCE_MEAN': 100,
         'INITIAL_USER_BALANCE_STDDEV': 20,
-        'POPULARITY_DECAY_RATE': 0.02, # Kept from sustainability config
+        'POPULARITY_DECAY_RATE': 0.02, 
         'ENABLE_CHURN': True,
-        'FINITE_DICTIONARY_SIZE': 1500, 'ZIPFIAN_ALPHA': 1.1, # Kept from sustainability config
-        'INNOVATOR_OUT_OF_DICTIONARY_CHANCE': 0.04, # Kept from sustainability config
-        'COMMON_WORD_VOCAB_SIZE': 150, 'INNOVATOR_RARE_WORD_CHANCE': 0.1, # Kept from sustainability config
-        'CHURN_INACTIVITY_THRESHOLD_STEPS': 75, # Kept from sustainability config (more lenient)
-        'CHURN_LOW_BALANCE_THRESHOLD_MULTIPLIER': 2.0, # Kept from sustainability config
-        'CHURN_BASE_PROB_IF_CONDITIONS_MET': 0.01, # Kept from sustainability config (more lenient)
-        'POTENTIAL_JOIN_TRIALS_PER_STEP': 50, # Kept from sustainability config
-        'MAX_NEW_JOINS_PER_STEP_SCALER': 0.02, # Kept from sustainability config
-        'CHURN_GRACE_PERIOD_STEPS': 20, # Kept from sustainability config
-        'TARGET_BROKE_AMONG_ACTIVE_PERCENT': 5.0 # Kept from sustainability config
+        'FINITE_DICTIONARY_SIZE': 1500, 'ZIPFIAN_ALPHA': 1.1,
+        'INNOVATOR_OUT_OF_DICTIONARY_CHANCE': 0.04,
+        'COMMON_WORD_VOCAB_SIZE': 150, 'INNOVATOR_RARE_WORD_CHANCE': 0.1,
+        'CHURN_INACTIVITY_THRESHOLD_STEPS': 75,
+        'CHURN_LOW_BALANCE_THRESHOLD_MULTIPLIER': 2.0,
+        'CHURN_BASE_PROB_IF_CONDITIONS_MET': 0.01,
+        'POTENTIAL_JOIN_TRIALS_PER_STEP': 50,
+        'MAX_NEW_JOINS_PER_STEP_SCALER': 0.02,
+        'CHURN_GRACE_PERIOD_STEPS': 20,
+        'TARGET_BROKE_AMONG_ACTIVE_PERCENT': 5.0,
+        'EMPIRICAL_CASE_SCENARIO': best_empirical_case_name # This was the missing key
     }
 
     empirical_params = get_empirical_params_for_case(best_empirical_case_name)
@@ -742,7 +743,7 @@ if __name__ == "__main__":
         history_attract = detailed_results.get('history_platform_attractiveness', [])
         history_avg_bal = detailed_results.get('history_avg_user_balance', [])
         history_top1_bal = detailed_results.get("history_avg_top1_percent_balance", [])
-        history_top10_bal = detailed_results.get("history_avg_top10_percent_balance", [])
+        history_top10_bal = detailed_results.get("history_top10_percent_balance", [])
 
         fig, ax_active = plt.subplots(figsize=(14, 8))
         color_active = 'navy'; ax_active.set_xlabel('Simulation Step', fontsize=12)
