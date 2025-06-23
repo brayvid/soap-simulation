@@ -97,7 +97,7 @@ def calculate_platform_attractiveness(current_users_on_platform_list, platform_r
     balances_on_platform = [u.balance for u in current_users_on_platform_list if u.active_in_sim]
 
     reward_signal = 0.0
-    avg_cost = params.get('COST_INTERACT_STALE_WORD', params.get('COST_SUBMIT_FRESH_WORD', 2)) 
+    avg_cost = params.get('COST_INTERACT_STALE_WORD', params.get('COST_SUBMIT_FRESH_WORD', 2))
     if num_platform_users > 0 and avg_cost > 0:
         reward_per_user_norm = (platform_rewards_this_step / num_platform_users) / avg_cost
         reward_signal = np.clip(reward_per_user_norm * params.get('ATTRACT_REWARD_SENSITIVITY', 0.3), 0.0, 0.35)
@@ -178,6 +178,7 @@ def get_empirical_params_for_case(case_name):
 
 # --- Main Simulation Function ---
 def run_full_simulation_with_dynamic_users(params, simulation_run_id="sim_dyn_users_run"):
+    # --- Parameter Unpacking ---
     POTENTIAL_USER_POOL_SIZE = int(params.get('POTENTIAL_USER_POOL_SIZE', 10000))
     INITIAL_ACTIVE_USERS = int(params.get('INITIAL_ACTIVE_USERS', 70))
     NUM_POLITICIANS = int(params.get('NUM_POLITICIANS', 20))
@@ -211,12 +212,17 @@ def run_full_simulation_with_dynamic_users(params, simulation_run_id="sim_dyn_us
     CHURN_GRACE_PERIOD_STEPS = int(params.get('CHURN_GRACE_PERIOD_STEPS', 20))
     POTENTIAL_JOIN_TRIALS_PER_STEP = int(params.get('POTENTIAL_JOIN_TRIALS_PER_STEP', 50))
     MAX_NEW_JOINS_PER_STEP_SCALER = float(params.get('MAX_NEW_JOINS_PER_STEP_SCALER', 0.02))
+    # --- NEW --- Parameter for platform money injection
+    PLATFORM_REWARD_INJECTION_ON_SUCCESS = float(params.get('PLATFORM_REWARD_INJECTION_ON_SUCCESS', 0.0))
 
+    # --- Initialization ---
     users_master_list = {}
     next_user_id_counter = 0
     politicians_dict = {f"pol_{i}": {'words': {}} for i in range(NUM_POLITICIANS)}
     platform_treasury = 0.0
     platform_total_rewards_paid_overall = 0.0
+    # --- NEW --- Track total injected money for analysis
+    platform_total_injections = 0.0
     total_word_instances_created = 0
     total_actions_simulation = 0
     archetype_keys = list(USER_ARCHETYPES_DIST.keys())
@@ -227,28 +233,15 @@ def run_full_simulation_with_dynamic_users(params, simulation_run_id="sim_dyn_us
 
     for i in range(INITIAL_ACTIVE_USERS):
         user_id_str = f"user_{next_user_id_counter}"
-        rand_val = random.random()
-        cumulative_prob = 0.0
-        chosen_archetype_idx = -1
-        for idx, prob in enumerate(archetype_probs_np):
-            cumulative_prob += prob
-            if rand_val < cumulative_prob:
-                chosen_archetype_idx = idx
-                break
-        if chosen_archetype_idx == -1: chosen_archetype_idx = len(archetype_keys) -1 # Fallback
-        
-        archetype = archetype_keys[chosen_archetype_idx]
+        archetype = np.random.choice(archetype_keys, p=archetype_probs_np)
         balance = max(0.0, np.random.normal(INITIAL_USER_BALANCE_MEAN, INITIAL_USER_BALANCE_STDDEV))
         users_master_list[user_id_str] = User(user_id_str, archetype, balance, 0)
         next_user_id_counter += 1
 
-    history_num_active_users = []
-    history_platform_attractiveness = []
-    history_avg_user_balance = []
-    history_avg_top1_percent_balance = []
-    history_avg_top10_percent_balance = []
+    history_num_active_users, history_platform_attractiveness = [], []
+    history_avg_user_balance, history_avg_top1_percent_balance, history_avg_top10_percent_balance = [], [], []
 
-
+    # --- Main Simulation Loop ---
     for step in range(1, SIMULATION_STEPS + 1):
         current_active_user_ids = [uid for uid, u in users_master_list.items() if u.active_in_sim]
         num_current_platform_active_users = len(current_active_user_ids)
@@ -256,20 +249,19 @@ def run_full_simulation_with_dynamic_users(params, simulation_run_id="sim_dyn_us
         step_rewards_this_step_val = 0.0
 
         if num_current_platform_active_users > 0:
-            num_to_sample_float = num_current_platform_active_users * USER_ACTIVITY_RATE_ON_PLATFORM
-            num_to_sample = min(num_current_platform_active_users, int(round(num_to_sample_float)))
+            num_to_sample = min(num_current_platform_active_users, int(round(num_current_platform_active_users * USER_ACTIVITY_RATE_ON_PLATFORM)))
             if num_to_sample > 0:
                 actors_for_this_step_ids = random.sample(current_active_user_ids, num_to_sample)
                 for user_id_str in actors_for_this_step_ids:
                     user = users_master_list[user_id_str]
-                    user.last_activity_step = step; action_taken = False
+                    user.last_activity_step = step
+                    action_taken = False
                     if user.archetype == 'Innovator': prob_try_new, prob_try_agree = INNOVATOR_PROB_NEW_CONCEPT, INNOVATOR_PROB_AGREE
                     elif user.archetype == 'Follower': prob_try_new, prob_try_agree = FOLLOWER_PROB_NEW_CONCEPT, FOLLOWER_PROB_AGREE
                     else: prob_try_new, prob_try_agree = BALANCED_PROB_NEW_CONCEPT, BALANCED_PROB_AGREE
                     
                     roll = random.random()
-                    pol_idx = random.randint(0, NUM_POLITICIANS - 1)
-                    pol_id_str = f"pol_{pol_idx}"
+                    pol_idx = random.randint(0, NUM_POLITICIANS - 1); pol_id_str = f"pol_{pol_idx}"
                     pol_words = politicians_dict[pol_id_str]['words']
 
                     if roll < prob_try_new: # Try to submit/originate a word
@@ -291,11 +283,10 @@ def run_full_simulation_with_dynamic_users(params, simulation_run_id="sim_dyn_us
                                 word_obj = WordData(user.id, step, initial_freshness_score=1.0)
                                 pol_words[word_str] = word_obj
                                 total_word_instances_created += 1
-                                user.words_originated_this_cycle[(pol_id_str, word_str)] = step
                                 word_obj.current_cycle_originator_id = user.id
                                 word_obj.count_this_cycle = 0
                                 word_obj.agreed_by_users_this_cycle.clear()
-                                word_obj.fees_contributed_this_cycle = 0.0
+                                word_obj.fees_contributed_this_cycle = 0.0 # Starts at 0 for a new word
                             else:
                                 can_originate_new_cycle = (word_obj.freshness_score >= MIN_FRESHNESS_FOR_FULL_ORIGINATOR_COST_AND_REWARD and
                                    word_obj.current_cycle_originator_id != user.id and
@@ -303,46 +294,43 @@ def run_full_simulation_with_dynamic_users(params, simulation_run_id="sim_dyn_us
 
                                 if can_originate_new_cycle:
                                     word_obj.current_cycle_originator_id = user.id
-                                    user.words_originated_this_cycle[(pol_id_str, word_str)] = step
-                                    word_obj.count_this_cycle = 0 
+                                    word_obj.count_this_cycle = 0
                                     word_obj.agreed_by_users_this_cycle.clear()
-                                    word_obj.fees_contributed_this_cycle = 0.0
+                                    # --- FIX --- Do not reset the fee pool. Let it roll over to the new cycle.
+                                    # This is the fix for the "lost pool" leak. The line below is now removed:
+                                    # word_obj.fees_contributed_this_cycle = 0.0
                             
                             word_obj.count_this_cycle += 1
-                            word_obj.raw_popularity_score += 1.0 
+                            word_obj.raw_popularity_score += 1.0
                             word_obj.fees_contributed_this_cycle += reward_pool_contribution
                             word_obj.agreed_by_users_this_cycle.add(user.id)
                             word_obj.last_interaction_step = step
                             word_obj.freshness_score = max(0.0, word_obj.freshness_score - FRESHNESS_DECAY_ON_INTERACT)
                             action_taken = True
 
-                    elif prob_try_new <= roll < prob_try_new + prob_try_agree: # Try to agree with an existing word
+                    elif prob_try_new <= roll < prob_try_new + prob_try_agree: # Try to agree
                         if pol_words:
                             existing_words_keys = list(pol_words.keys())
                             if existing_words_keys:
                                 word_to_agree_str = ""
                                 if user.archetype == 'Follower' and FOLLOWER_POPULARITY_BIAS_FACTOR > 0:
                                     scores_list = [pol_words[w].raw_popularity_score + 0.1 for w in existing_words_keys]
-                                    scores_np = np.array(scores_list, dtype=np.float64)
-                                    scores_np = np.maximum(scores_np, 0.01)
-                                    
-                                    scores_b = np.power(scores_np, FOLLOWER_POPULARITY_BIAS_FACTOR)
-                                    
-                                    sum_b = np.sum(scores_b)
-                                    if sum_b > 1e-9:
-                                        probs_np = scores_b / sum_b
-                                        if not (np.isnan(probs_np).any() or abs(np.sum(probs_np) - 1.0) > 1e-5):
-                                            try: word_to_agree_str = np.random.choice(existing_words_keys, p=probs_np)
-                                            except ValueError: word_to_agree_str = random.choice(existing_words_keys)
-                                        else: word_to_agree_str = random.choice(existing_words_keys)
+                                    scores_np = np.power(np.array(scores_list, dtype=np.float64), FOLLOWER_POPULARITY_BIAS_FACTOR)
+                                    sum_scores = np.sum(scores_np)
+                                    if sum_scores > 1e-9:
+                                        probs_np = scores_np / sum_scores
+                                        try: word_to_agree_str = np.random.choice(existing_words_keys, p=probs_np)
+                                        except (ValueError, FloatingPointError): word_to_agree_str = random.choice(existing_words_keys)
                                     else: word_to_agree_str = random.choice(existing_words_keys)
                                 else: word_to_agree_str = random.choice(existing_words_keys)
 
                                 if word_to_agree_str:
                                     word_obj = pol_words[word_to_agree_str]; cost = COST_INTERACT_STALE_WORD
                                     if user.balance >= cost:
-                                        user.balance -= cost; platform_treasury += cost * PLATFORM_RAKE_PERCENTAGE
-                                        reward_contrib = cost * (1.0 - PLATFORM_RAKE_PERCENTAGE)
+                                        user.balance -= cost
+                                        rake_for_this_action = cost * PLATFORM_RAKE_PERCENTAGE
+                                        reward_contrib = cost - rake_for_this_action
+                                        platform_treasury += rake_for_this_action
                                         
                                         word_obj.count_this_cycle += 1
                                         word_obj.raw_popularity_score +=1.0
@@ -355,11 +343,11 @@ def run_full_simulation_with_dynamic_users(params, simulation_run_id="sim_dyn_us
         
         total_actions_simulation += actions_this_step
 
+        # --- Decay and Reward Distribution ---
         for pol_id, pol_data in politicians_dict.items():
             for word_str, word_obj in pol_data['words'].items():
                 if word_obj.raw_popularity_score > 0:
-                    word_obj.raw_popularity_score -= word_obj.raw_popularity_score * POPULARITY_DECAY_RATE
-                    if word_obj.raw_popularity_score < 0.01: word_obj.raw_popularity_score = 0.0
+                    word_obj.raw_popularity_score = max(0.0, word_obj.raw_popularity_score * (1 - POPULARITY_DECAY_RATE))
 
                 if step > word_obj.last_interaction_step:
                     word_obj.freshness_score = min(1.0, word_obj.freshness_score + FRESHNESS_RECOVERY_PER_DORMANT_STEP)
@@ -368,38 +356,41 @@ def run_full_simulation_with_dynamic_users(params, simulation_run_id="sim_dyn_us
                    (word_obj.last_reward_step == -1 or (step - word_obj.last_reward_step) > REWARD_CYCLE_COOLDOWN_STEPS):
                     
                     reward_pool = word_obj.fees_contributed_this_cycle
+                    
+                    # --- NEW: "Money Faucet" - Inject fresh money from the platform into the pool ---
+                    reward_pool += PLATFORM_REWARD_INJECTION_ON_SUCCESS
+                    platform_total_injections += PLATFORM_REWARD_INJECTION_ON_SUCCESS
+                    
                     originator_id_str = word_obj.current_cycle_originator_id
-
                     if originator_id_str and originator_id_str in users_master_list and users_master_list[originator_id_str].active_in_sim:
                         originator_user = users_master_list[originator_id_str]
                         rew_orig = reward_pool * REWARD_TO_ORIGINAL_SUBMITTER_SHARE
                         originator_user.balance += rew_orig
                         originator_user.total_rewards_received += rew_orig
-                        platform_total_rewards_paid_overall += rew_orig
-                        step_rewards_this_step_val += rew_orig
+                        platform_total_rewards_paid_overall += rew_orig; step_rewards_this_step_val += rew_orig
                     
                     agreers_for_reward = word_obj.agreed_by_users_this_cycle
                     num_agreers_this_cycle = len(agreers_for_reward)
                     if num_agreers_this_cycle > 0:
                         rew_agr_tot = reward_pool * (1.0 - REWARD_TO_ORIGINAL_SUBMITTER_SHARE)
                         per_agr = rew_agr_tot / num_agreers_this_cycle
-
                         for agr_id_str in agreers_for_reward:
                             if agr_id_str in users_master_list and users_master_list[agr_id_str].active_in_sim:
                                 agreer_user = users_master_list[agr_id_str]
                                 agreer_user.balance += per_agr
                                 agreer_user.total_rewards_received += per_agr
-                                platform_total_rewards_paid_overall += per_agr
-                                step_rewards_this_step_val += per_agr
+                                platform_total_rewards_paid_overall += per_agr; step_rewards_this_step_val += per_agr
                     
+                    # Reset cycle data after successful payout
                     word_obj.fees_contributed_this_cycle = 0.0
-                    word_obj.count_this_cycle = 0 
+                    word_obj.count_this_cycle = 0
                     word_obj.agreed_by_users_this_cycle.clear()
                     word_obj.times_became_popular += 1
                     word_obj.last_reward_step = step
                     word_obj.freshness_score *= (1.0 - FRESHNESS_DROP_AFTER_REWARD)
                     word_obj.current_cycle_originator_id = None
 
+        # --- User Growth and Churn ---
         current_active_users_for_attract_calc = [u for u in users_master_list.values() if u.active_in_sim]
         attractiveness = calculate_platform_attractiveness(current_active_users_for_attract_calc, step_rewards_this_step_val, actions_this_step, params, step)
         history_platform_attractiveness.append(attractiveness)
@@ -408,121 +399,58 @@ def run_full_simulation_with_dynamic_users(params, simulation_run_id="sim_dyn_us
         if len(users_master_list) < POTENTIAL_USER_POOL_SIZE:
             num_potential_can_join = POTENTIAL_USER_POOL_SIZE - len(users_master_list)
             num_trials = min(num_potential_can_join, int(POTENTIAL_JOIN_TRIALS_PER_STEP + len(current_active_users_for_attract_calc) * 0.05 * attractiveness))
-            max_joins_this_step = int(MAX_NEW_JOINS_PER_STEP_SCALER * POTENTIAL_USER_POOL_SIZE * attractiveness)
-            max_joins_allowed = min(num_potential_can_join, max_joins_this_step)
+            max_joins_this_step = min(num_potential_can_join, int(MAX_NEW_JOINS_PER_STEP_SCALER * POTENTIAL_USER_POOL_SIZE * attractiveness))
             
             for _ in range(num_trials):
-                if newly_joined_this_step >= max_joins_allowed:
-                    break
+                if newly_joined_this_step >= max_joins_this_step: break
                 if random.random() < attractiveness:
                     uid_str = f"user_{next_user_id_counter}"
-                    rand_val_join = random.random()
-                    cumulative_prob_join = 0.0
-                    chosen_archetype_idx_join = -1
-                    for idx_j, prob_j in enumerate(archetype_probs_np):
-                        cumulative_prob_join += prob_j
-                        if rand_val_join < cumulative_prob_join:
-                            chosen_archetype_idx_join = idx_j
-                            break
-                    if chosen_archetype_idx_join == -1: chosen_archetype_idx_join = len(archetype_keys) -1
-
-                    arch = archetype_keys[chosen_archetype_idx_join]
+                    arch = np.random.choice(archetype_keys, p=archetype_probs_np)
                     bal = max(0.0, np.random.normal(INITIAL_USER_BALANCE_MEAN, INITIAL_USER_BALANCE_STDDEV))
                     users_master_list[uid_str] = User(uid_str, arch, bal, step)
-                    next_user_id_counter +=1
-                    newly_joined_this_step +=1
+                    next_user_id_counter +=1; newly_joined_this_step +=1
         
         if ENABLE_CHURN and step > CHURN_GRACE_PERIOD_STEPS:
-            churn_ids = []
-            for uid_key, u_obj_val in users_master_list.items():
-                if not u_obj_val.active_in_sim:
-                    continue
-                
-                c_prob = 0.0
-                if (step - u_obj_val.last_activity_step) > CHURN_INACTIVITY_THRESHOLD_STEPS:
-                    c_prob += CHURN_BASE_PROB_IF_CONDITIONS_MET * 0.5 
-                if u_obj_val.balance < CHURN_LOW_BALANCE_THRESHOLD:
-                    c_prob += CHURN_BASE_PROB_IF_CONDITIONS_MET * 0.5
-                if u_obj_val.total_rewards_received == 0 and \
-                   u_obj_val.balance < INITIAL_USER_BALANCE_MEAN * 0.4 and \
-                   step > (u_obj_val.join_step + (SIMULATION_STEPS * 0.15)):
-                    c_prob += CHURN_BASE_PROB_IF_CONDITIONS_MET * 0.6
-
-                if random.random() < np.clip(c_prob, 0.0, 0.85):
-                    churn_ids.append(uid_key)
-            
+            churn_ids = [uid for uid, u in users_master_list.items() if u.active_in_sim and random.random() < np.clip(
+                (CHURN_BASE_PROB_IF_CONDITIONS_MET * 0.5 if (step - u.last_activity_step) > CHURN_INACTIVITY_THRESHOLD_STEPS else 0) +
+                (CHURN_BASE_PROB_IF_CONDITIONS_MET * 0.5 if u.balance < CHURN_LOW_BALANCE_THRESHOLD else 0) +
+                (CHURN_BASE_PROB_IF_CONDITIONS_MET * 0.6 if u.total_rewards_received == 0 and u.balance < INITIAL_USER_BALANCE_MEAN * 0.4 and step > (u.join_step + (SIMULATION_STEPS * 0.15)) else 0),
+                0.0, 0.85)]
             for cid_str in churn_ids:
-                if users_master_list[cid_str].active_in_sim:
-                    users_master_list[cid_str].active_in_sim = False
-                    users_master_list[cid_str].departure_step = step
+                users_master_list[cid_str].active_in_sim = False
+                users_master_list[cid_str].departure_step = step
         
-        active_count_this_step = len([u for u in users_master_list.values() if u.active_in_sim])
-        history_num_active_users.append(active_count_this_step)
-        
+        # --- History Tracking ---
         active_bals = [u.balance for u in users_master_list.values() if u.active_in_sim]
+        history_num_active_users.append(len(active_bals))
         history_avg_user_balance.append(np.mean(active_bals) if active_bals else 0.0)
-        
         if active_bals:
             sorted_active_bals = np.sort(active_bals)
             k1 = max(1, int(len(sorted_active_bals) * 0.01))
-            avg_top1 = np.mean(sorted_active_bals[-k1:]) if len(sorted_active_bals[-k1:]) > 0 else 0.0
-            history_avg_top1_percent_balance.append(avg_top1)
-            
+            history_avg_top1_percent_balance.append(np.mean(sorted_active_bals[-k1:]))
             k10 = max(1, int(len(sorted_active_bals) * 0.10))
-            avg_top10 = np.mean(sorted_active_bals[-k10:]) if len(sorted_active_bals[-k10:]) > 0 else 0.0
-            history_avg_top10_percent_balance.append(avg_top10)
+            history_avg_top10_percent_balance.append(np.mean(sorted_active_bals[-k10:]))
         else:
-            history_avg_top1_percent_balance.append(0.0)
-            history_avg_top10_percent_balance.append(0.0)
+            history_avg_top1_percent_balance.append(0.0); history_avg_top10_percent_balance.append(0.0)
 
     # --- Post-simulation calculations ---
     final_active_users_list = [u for u in users_master_list.values() if u.active_in_sim]
     final_balances = [u.balance for u in final_active_users_list] if final_active_users_list else [0.0]
     final_num_active_users = len(final_active_users_list)
-    
-    final_gini = get_gini(final_balances)
-    final_avg_balance = np.mean(final_balances) if final_balances and len(final_balances)>0 else 0.0
-    final_median_balance = np.median(final_balances) if final_balances and len(final_balances)>0 else 0.0
-    
     min_action_cost_val = min(COST_SUBMIT_FRESH_WORD, COST_INTERACT_STALE_WORD)
-    users_broke_count = sum(1 for b_val in final_balances if b_val < min_action_cost_val)
-
-    total_popular_word_events = 0
-    unique_popular_words_global = set()
-    for pol_data in politicians_dict.values():
-        for word_s, word_o in pol_data['words'].items():
-            if word_o.times_became_popular > 0:
-                total_popular_word_events += word_o.times_became_popular
-                unique_popular_words_global.add(word_s)
-
-    avg_hist_u = np.mean(history_num_active_users) if history_num_active_users else 0.0
     
-    user_lifespans, net_balance_changes = [], []
-    profit_making_users_count, profit_making_users_total_gains = 0, 0.0
-    loss_making_users_count, loss_making_users_total_losses = 0, 0.0
-    substantial_earners_count = 0
-    
+    profit_making_users_count, loss_making_users_count = 0, 0
+    profit_making_users_total_gains, loss_making_users_total_losses = 0.0, 0.0
     user_join_steps_for_scatter, user_final_balances_for_scatter, user_net_change_for_color = [], [], []
 
     for user_obj in users_master_list.values():
-        lifespan = (user_obj.departure_step if user_obj.departure_step != -1 else SIMULATION_STEPS) - user_obj.join_step
-        user_lifespans.append(lifespan)
-        
         net_change = user_obj.balance - user_obj.initial_balance
-        net_balance_changes.append(net_change)
-
         if net_change > 0:
             profit_making_users_count += 1
             profit_making_users_total_gains += net_change
-            if user_obj.initial_balance > 0 and user_obj.balance > user_obj.initial_balance * 2:
-                 substantial_earners_count +=1
-            elif user_obj.initial_balance == 0 and user_obj.balance > INITIAL_USER_BALANCE_MEAN :
-                 substantial_earners_count +=1
-
         elif net_change < 0:
             loss_making_users_count += 1
             loss_making_users_total_losses += abs(net_change)
-        
         user_join_steps_for_scatter.append(user_obj.join_step)
         user_final_balances_for_scatter.append(user_obj.balance)
         user_net_change_for_color.append(net_change)
@@ -532,115 +460,53 @@ def run_full_simulation_with_dynamic_users(params, simulation_run_id="sim_dyn_us
         "final_num_active_users": final_num_active_users,
         "final_treasury": platform_treasury,
         "total_rewards_paid": platform_total_rewards_paid_overall,
-        "final_avg_balance": final_avg_balance,
-        "final_median_balance": final_median_balance,
-        "final_gini_coefficient": final_gini,
-        "users_broke_percent": (users_broke_count / final_num_active_users) * 100 if final_num_active_users > 0 else (100.0 if INITIAL_ACTIVE_USERS > 0 and final_num_active_users == 0 else 0.0),
+        "platform_total_injections": platform_total_injections, # --- NEW ---
+        "final_avg_balance": np.mean(final_balances) if final_balances else 0.0,
+        "final_median_balance": np.median(final_balances) if final_balances else 0.0,
+        "final_gini_coefficient": get_gini(final_balances),
+        "users_broke_percent": (sum(1 for b in final_balances if b < min_action_cost_val) / final_num_active_users * 100) if final_num_active_users > 0 else 0.0,
         "total_actions_in_sim": total_actions_simulation,
-        "avg_actions_per_active_user_per_step_overall": total_actions_simulation / (avg_hist_u * SIMULATION_STEPS) if avg_hist_u * SIMULATION_STEPS > 0 else 0.0,
-        "total_unique_word_instances_created": total_word_instances_created,
-        "unique_popular_word_strings_count": len(unique_popular_words_global),
-        "total_popular_word_events": total_popular_word_events,
         "history_num_active_users": history_num_active_users,
         "history_platform_attractiveness": history_platform_attractiveness,
         "history_avg_user_balance": history_avg_user_balance,
         "history_avg_top1_percent_balance": history_avg_top1_percent_balance,
         "history_avg_top10_percent_balance": history_avg_top10_percent_balance,
-        "user_lifespans": user_lifespans,
-        "net_balance_changes": net_balance_changes,
         "profit_making_users_count": profit_making_users_count,
         "profit_making_users_total_gains": profit_making_users_total_gains,
         "loss_making_users_count": loss_making_users_count,
         "loss_making_users_total_losses": loss_making_users_total_losses,
-        "substantial_earners_count": substantial_earners_count,
         "total_users_ever_joined": len(users_master_list),
         "user_join_steps_for_scatter": user_join_steps_for_scatter,
         "user_final_balances_for_scatter": user_final_balances_for_scatter,
-        "user_net_change_for_color_scatter": user_net_change_for_color
+        "user_net_change_for_color_scatter": user_net_change_for_color,
     }
-
-
-# --- Objective Function (calculate_dynamic_user_growth_score - unchanged) ---
-def calculate_dynamic_user_growth_score(results, target_gini=0.50, min_avg_balance_ratio_retained=0.70, desired_final_user_ratio_of_potential=0.60, target_sustainability_of_peak=0.75):
-    params = results['params_config_copy']
-    score = 0.0
-    POTENTIAL_USER_POOL_SIZE = params.get('POTENTIAL_USER_POOL_SIZE', 10000)
-
-    final_user_ratio = results['final_num_active_users'] / POTENTIAL_USER_POOL_SIZE if POTENTIAL_USER_POOL_SIZE > 0 else 0
-    growth_target_score = 0
-    if final_user_ratio < desired_final_user_ratio_of_potential * 0.4:
-        growth_target_score = -((desired_final_user_ratio_of_potential * 0.4 - final_user_ratio) * 25000)
-    else:
-        growth_target_score = np.clip(final_user_ratio / desired_final_user_ratio_of_potential, 0, 1.1) * 10000.0
-    if final_user_ratio >= desired_final_user_ratio_of_potential: growth_target_score += 4000
-    score += growth_target_score
-
-    if results['history_num_active_users'] and max(results['history_num_active_users']) > 0:
-        peak_users = max(results['history_num_active_users'])
-        sustainability_of_peak = results['final_num_active_users'] / peak_users if peak_users > 0 else 0
-        if sustainability_of_peak < target_sustainability_of_peak * 0.8:
-            score -= (target_sustainability_of_peak * 0.8 - sustainability_of_peak) * 8000
-        else:
-            score += sustainability_of_peak * 1500
-    elif results['final_num_active_users'] == 0 and params.get('INITIAL_ACTIVE_USERS',0) > 0 :
-             score -= 25000
-
-    if results['final_num_active_users'] > params.get('INITIAL_ACTIVE_USERS',10) * 0.15 :
-        treasury_score_comp = 0
-        if results['final_treasury'] < 0: treasury_score_comp = results['final_treasury'] * 4.0
-        else: treasury_score_comp = results['final_treasury'] * 0.0008
-        score += treasury_score_comp
-        
-        target_broke = params.get('TARGET_BROKE_AMONG_ACTIVE_PERCENT', 5.0)
-        broke_diff = results['users_broke_percent'] - target_broke
-        if broke_diff > 0: score -= (broke_diff / 2.0)**2 * 1000.0
-        
-        avg_bal_ratio = results['final_avg_balance'] / params['INITIAL_USER_BALANCE_MEAN'] if params['INITIAL_USER_BALANCE_MEAN'] > 0 else 0
-        if avg_bal_ratio < min_avg_balance_ratio_retained: score -= (min_avg_balance_ratio_retained - avg_bal_ratio) * 1800.0
-        elif avg_bal_ratio > 1.5: score -= (avg_bal_ratio - 1.5) * 300.0
-        else: score += avg_bal_ratio * 250.0
-        
-        gini_diff = results['final_gini_coefficient'] - target_gini
-        if gini_diff > 0 : score -= gini_diff * 1500.0
-        else: score += (target_gini - results['final_gini_coefficient']) * 400.0
-
-        score += results['avg_actions_per_active_user_per_step_overall'] * 8000.0
-
-        if results['total_actions_in_sim'] > 0:
-            pop_ev_per_1k_act = (results['total_popular_word_events'] / results['total_actions_in_sim']) * 1000
-            score += pop_ev_per_1k_act * 100.0
-        
-        if results['total_popular_word_events'] > 0:
-            diversity = (results['unique_popular_word_strings_count'] / results['total_popular_word_events'])
-            score += diversity * 800.0
-        elif results['total_unique_word_instances_created'] > 0 and results['total_popular_word_events'] == 0: score -= 1000
-    else:
-        score -= 120000 
-    return score
 
 # --- Main Execution ---
 if __name__ == "__main__":
     best_empirical_case_name = 'BaselineEngagement'
 
-    # FIXED PARAMETERS for addressing monetization problems:
+    # --- FIX --- Parameters for a more sustainable, generative economy
     fixed_params = {
-        'PLATFORM_RAKE_PERCENTAGE': 0.01,
-        'REWARD_TO_ORIGINAL_SUBMITTER_SHARE': 0.8,
-        'POPULARITY_THRESHOLD_BASE': 5,
+        # --- FIX #1: Eliminate the primary money sink
+        'PLATFORM_RAKE_PERCENTAGE': 0.0,
+        # --- FIX #3: Introduce a "money faucet"
+        'PLATFORM_REWARD_INJECTION_ON_SUCCESS': 15.0, # Platform adds 15 currency units to each successful reward pool
+        
+        'REWARD_TO_ORIGINAL_SUBMITTER_SHARE': 0.5, # Balance rewards more between originators and agreers
+        'POPULARITY_THRESHOLD_BASE': 6,          # Lower threshold to make rewards more frequent
         'COST_SUBMIT_FRESH_WORD': 2.0,
         'COST_INTERACT_STALE_WORD': 1.0,
-        'FRESHNESS_DROP_AFTER_REWARD': 0.05,
-        'REWARD_CYCLE_COOLDOWN_STEPS': 3,
+        'FRESHNESS_DROP_AFTER_REWARD': 0.1,
+        'REWARD_CYCLE_COOLDOWN_STEPS': 5,
         'USER_ACTIVITY_RATE_ON_PLATFORM': 0.75,
         'MIN_FRESHNESS_FOR_FULL_ORIGINATOR_COST_AND_REWARD': 0.7,
-        # Revert to original larger simulation values for comprehensive test
         'POTENTIAL_USER_POOL_SIZE': 20000,
         'INITIAL_ACTIVE_USERS': 100,
         'NUM_POLITICIANS': 50,
         'SIMULATION_STEPS': 240,
         'INITIAL_USER_BALANCE_MEAN': 100,
         'INITIAL_USER_BALANCE_STDDEV': 20,
-        'POPULARITY_DECAY_RATE': 0.02, 
+        'POPULARITY_DECAY_RATE': 0.02,
         'ENABLE_CHURN': True,
         'FINITE_DICTIONARY_SIZE': 1500, 'ZIPFIAN_ALPHA': 1.1,
         'INNOVATOR_OUT_OF_DICTIONARY_CHANCE': 0.04,
@@ -652,47 +518,27 @@ if __name__ == "__main__":
         'MAX_NEW_JOINS_PER_STEP_SCALER': 0.02,
         'CHURN_GRACE_PERIOD_STEPS': 20,
         'TARGET_BROKE_AMONG_ACTIVE_PERCENT': 5.0,
-        'EMPIRICAL_CASE_SCENARIO': best_empirical_case_name # This was the missing key
+        'EMPIRICAL_CASE_SCENARIO': best_empirical_case_name
     }
 
     empirical_params = get_empirical_params_for_case(best_empirical_case_name)
     final_config = empirical_params.copy()
-    final_config.update(fixed_params) # Fixed params override any conflicting empirical/base values
+    final_config.update(fixed_params)
 
     min_cost_val = min(final_config['COST_SUBMIT_FRESH_WORD'], final_config['COST_INTERACT_STALE_WORD'])
     final_config['CHURN_LOW_BALANCE_THRESHOLD'] = min_cost_val * final_config['CHURN_LOW_BALANCE_THRESHOLD_MULTIPLIER']
-    if final_config['CHURN_LOW_BALANCE_THRESHOLD'] <=0: # Ensure it's positive
+    if final_config['CHURN_LOW_BALANCE_THRESHOLD'] <=0:
         final_config['CHURN_LOW_BALANCE_THRESHOLD'] = 0.1
 
-    print(f"--- Running Simulation with FIXED Parameters (Monetization Problems Addressed) ---")
-    print(f"Empirical Case: {final_config['EMPIRICAL_CASE_SCENARIO']}")
-    print(f"Fixed Parameters Applied:")
-    print(f"  PLATFORM_RAKE_PERCENTAGE: {final_config['PLATFORM_RAKE_PERCENTAGE']}")
-    print(f"  REWARD_TO_ORIGINAL_SUBMITTER_SHARE: {final_config['REWARD_TO_ORIGINAL_SUBMITTER_SHARE']}")
-    print(f"  POPULARITY_THRESHOLD_BASE: {final_config['POPULARITY_THRESHOLD_BASE']}")
-    print(f"  COST_SUBMIT_FRESH_WORD: {final_config['COST_SUBMIT_FRESH_WORD']}")
-    print(f"  COST_INTERACT_STALE_WORD: {final_config['COST_INTERACT_STALE_WORD']}")
-    print(f"  FRESHNESS_DROP_AFTER_REWARD: {final_config['FRESHNESS_DROP_AFTER_REWARD']}")
-    print(f"  REWARD_CYCLE_COOLDOWN_STEPS: {final_config['REWARD_CYCLE_COOLDOWN_STEPS']}")
-    print(f"  USER_ACTIVITY_RATE_ON_PLATFORM: {final_config['USER_ACTIVITY_RATE_ON_PLATFORM']}")
-    print(f"  MIN_FRESHNESS_FOR_FULL_ORIGINATOR_COST_AND_REWARD: {final_config['MIN_FRESHNESS_FOR_FULL_ORIGINATOR_COST_AND_REWARD']}")
-    print(f"  SIMULATION_STEPS: {final_config['SIMULATION_STEPS']}")
-    print(f"  POTENTIAL_USER_POOL_SIZE: {final_config['POTENTIAL_USER_POOL_SIZE']}")
+    print(f"--- Running Simulation with Sustainable Economy Parameters ---")
+    print(f"  PLATFORM_RAKE_PERCENTAGE: {final_config['PLATFORM_RAKE_PERCENTAGE']} (FIX: Set to 0)")
+    print(f"  PLATFORM_REWARD_INJECTION_ON_SUCCESS: {final_config['PLATFORM_REWARD_INJECTION_ON_SUCCESS']} (FIX: New money enters system)")
+    print(f"  'Lost Pool' Leak: Plugged by rolling over funds (see code logic).")
 
-
-    initialize_zipfian_dictionary(
-        final_config.get('FINITE_DICTIONARY_SIZE'),
-        final_config.get('ZIPFIAN_ALPHA')
-    )
+    initialize_zipfian_dictionary(final_config.get('FINITE_DICTIONARY_SIZE'), final_config.get('ZIPFIAN_ALPHA'))
 
     run_start_time = time.time()
-    num_runs = 1 # Only one run as requested
-    
-    profiler = cProfile.Profile()
-    profiler.enable()
     detailed_results = run_full_simulation_with_dynamic_users(final_config.copy(), f"fixed_params_run_1")
-    profiler.disable()
-
     run_duration_minutes = (time.time() - run_start_time) / 60
     print(f"\n--- Simulation Complete --- (Total time: {run_duration_minutes:.2f}m)")
 
@@ -700,139 +546,95 @@ if __name__ == "__main__":
     total_users_ever_joined = detailed_results.get("total_users_ever_joined", 1)
     profit_percentage = (profit_makers_count / total_users_ever_joined) * 100 if total_users_ever_joined > 0 else 0
 
-    print(f"\n--- Key Metrics for Fixed Configuration ---")
-    print(f"  Profit Making Users: {profit_percentage:.2f}% (Target: ~20%)")
-    print(f"  PLATFORM_RAKE_PERCENTAGE: {final_config['PLATFORM_RAKE_PERCENTAGE']}")
+    print(f"\n--- Key Metrics for Sustainable Configuration ---")
+    print(f"  Profit Making Users: {profit_makers_count} / {total_users_ever_joined} ({profit_percentage:.2f}%)")
+    
+    # --- Analysis of money flow ---
+    total_paid_by_users = abs(detailed_results.get("loss_making_users_total_losses", 0)) + detailed_results.get("profit_making_users_total_gains", 0)
+    total_injections = detailed_results.get("platform_total_injections", 0)
+    print(f"  Total Money Paid by Users for Actions (approx): {total_paid_by_users:,.2f}")
+    print(f"  Total New Money Injected by Platform: {total_injections:,.2f}")
+    print(f"  Total Rewards Distributed to Users: {detailed_results.get('total_rewards_paid', 0):,.2f}")
+
 
     print("\n--- Full Metrics ---")
     key_metrics_to_show = [
-        "final_num_active_users", "final_treasury", "total_rewards_paid",
+        "final_num_active_users", "final_treasury", "total_rewards_paid", "platform_total_injections",
         "final_avg_balance", "final_median_balance", "users_broke_percent",
-        "final_gini_coefficient", "total_popular_word_events",
-        "unique_popular_word_strings_count", "avg_actions_per_active_user_per_step_overall",
-        "profit_making_users_count", "profit_making_users_total_gains",
-        "loss_making_users_count", "loss_making_users_total_losses",
-        "substantial_earners_count", "total_users_ever_joined"
+        "final_gini_coefficient", "profit_making_users_count", "profit_making_users_total_gains",
+        "loss_making_users_count", "loss_making_users_total_losses", "total_users_ever_joined"
     ]
     for k_met_s in key_metrics_to_show:
         val = detailed_results.get(k_met_s)
-        if isinstance(val, (float, np.float64)): print(f"  {k_met_s}: {val:,.4f}")
+        if isinstance(val, (float, np.float64)): print(f"  {k_met_s}: {val:,.2f}")
         else: print(f"  {k_met_s}: {val}")
-    avg_lifespan = np.mean(detailed_results.get("user_lifespans", [0]))
-    median_lifespan = np.median(detailed_results.get("user_lifespans", [0]))
-    print(f"  Average User Lifespan: {avg_lifespan:.2f} steps")
-    print(f"  Median User Lifespan: {median_lifespan:.2f} steps")
-
-    print("\n--- Profiling Results (Top 25 Cumulative Time) ---")
-    stats = pstats.Stats(profiler).sort_stats('cumulative')
-    stats.print_stats(25)
-
+    
+    # --- Plotting ---
     timestamp_str = datetime.now().strftime("%Y%m%d_%H%M%S")
-    results_dir = "simulation_results_fixed_monetization"
+    results_dir = "simulation_results_sustainable_economy"
     os.makedirs(results_dir, exist_ok=True)
-    results_filename_base = f"{results_dir}/fixed_monetization_run_{timestamp_str}"
-
-    df_run_summary = pd.DataFrame([detailed_results])
-    try:
-        df_run_summary.to_csv(f"{results_filename_base}_summary.csv", index=False)
-        print(f"\nRun summary saved to: {results_filename_base}_summary.csv")
-    except Exception as e_csv: print(f"Error saving summary CSV: {e_csv}")
-
+    results_filename_base = f"{results_dir}/sustainable_economy_run_{timestamp_str}"
+    
+    # Growth Dynamics Plot
     if 'history_num_active_users' in detailed_results and detailed_results['history_num_active_users']:
-        history_active = detailed_results['history_num_active_users']
-        history_attract = detailed_results.get('history_platform_attractiveness', [])
-        history_avg_bal = detailed_results.get('history_avg_user_balance', [])
-        history_top1_bal = detailed_results.get("history_avg_top1_percent_balance", [])
-        history_top10_bal = detailed_results.get("history_top10_percent_balance", [])
-
         fig, ax_active = plt.subplots(figsize=(14, 8))
         color_active = 'navy'; ax_active.set_xlabel('Simulation Step', fontsize=12)
         ax_active.set_ylabel('Active Users', color=color_active, fontsize=12)
-        p1, = ax_active.plot(history_active, color=color_active, label='Active Users', linewidth=2.5)
-        ax_active.tick_params(axis='y', labelcolor=color_active, labelsize=10); ax_active.tick_params(axis='x', labelsize=10)
-        h_line_pool = ax_active.axhline(y=final_config['POTENTIAL_USER_POOL_SIZE'], color='orangered', linestyle='--', label=f"Potential Pool ({final_config['POTENTIAL_USER_POOL_SIZE']})")
+        p1, = ax_active.plot(detailed_results['history_num_active_users'], color=color_active, label='Active Users', linewidth=2.5)
+        
+        ax_balances = ax_active.twinx(); ax_balances.spines["right"].set_position(("outward", 60));
+        color_avg_bal = 'darkgreen'; color_top1 = 'goldenrod';
+        p3, = ax_balances.plot(detailed_results['history_avg_user_balance'], color=color_avg_bal, linestyle='-.', alpha=0.9, label='Avg Balance (All Active)')
+        p4, = ax_balances.plot(detailed_results['history_avg_top1_percent_balance'], color=color_top1, linestyle='--', linewidth=2, alpha=0.85, label='Avg Balance (Top 1% Active)')
+        h_line_initial_bal = ax_balances.axhline(y=final_config['INITIAL_USER_BALANCE_MEAN'], color='red', linestyle=':', linewidth=1.5, label=f'Initial Avg Balance ({final_config["INITIAL_USER_BALANCE_MEAN"]})')
 
-        ax_attract = ax_active.twinx(); color_attract = 'forestgreen'; p2 = None
-        if history_attract:
-            p2, = ax_attract.plot(np.array(history_attract) * 100, color=color_attract, linestyle=':', alpha=0.7, label='Attractiveness (x100)')
-        ax_attract.set_ylabel('Attractiveness (x100)', color=color_attract, fontsize=12); ax_attract.tick_params(axis='y', labelcolor=color_attract, labelsize=10)
-        ax_attract.set_ylim(0, max(100, (np.max(history_attract) * 100 * 1.1) if history_attract and np.max(history_attract)>0 else 100 ) )
-
-        ax_balances = ax_active.twinx(); ax_balances.spines["right"].set_position(("outward", 60)); p3, p4, p5 = None, None, None
-        color_avg_bal = 'purple'; color_top1 = 'goldenrod'; color_top10 = 'darkorange'
-        if history_avg_bal: p3, = ax_balances.plot(history_avg_bal, color=color_avg_bal, linestyle='-.', alpha=0.8, label='Avg Balance (All Active)')
-        if history_top1_bal: p4, = ax_balances.plot(history_top1_bal, color=color_top1, linestyle='--', linewidth=2, alpha=0.85, label='Avg Balance (Top 1% Active)')
-        if history_top10_bal: p5, = ax_balances.plot(history_top10_bal, color=color_top10, linestyle=':', linewidth=2, alpha=0.75, label='Avg Balance (Top 10% Active)')
         ax_balances.set_ylabel('User Balance', color='black', fontsize=12)
         ax_balances.tick_params(axis='y', labelcolor='black', labelsize=10)
-        max_balance_val = final_config['INITIAL_USER_BALANCE_MEAN'] * 1.5
-        if history_top1_bal and len(history_top1_bal) > 0 and np.max(history_top1_bal) > max_balance_val : max_balance_val = np.max(history_top1_bal) * 1.1
-        elif history_avg_bal and len(history_avg_bal) > 0 and np.max(history_avg_bal) > max_balance_val : max_balance_val = np.max(history_avg_bal) * 1.1
-        ax_balances.set_ylim(0, max_balance_val if max_balance_val > 0 else final_config['INITIAL_USER_BALANCE_MEAN'] * 2)
-
-        fig.suptitle(f"User Growth & Dynamics (Monetization Fixed)\nProfit Makers: {profit_percentage:.1f}% | Rake: {final_config['PLATFORM_RAKE_PERCENTAGE']:.3f}", fontsize=14, fontweight='bold')
-        lines, labels = [], []
-        for handle_label_pair in [(p1, p1.get_label() if p1 else None), (h_line_pool, h_line_pool.get_label()),
-                                  (p2, p2.get_label() if p2 else None), (p3, p3.get_label() if p3 else None),
-                                  (p4, p4.get_label() if p4 else None), (p5, p5.get_label() if p5 else None)]:
-            if handle_label_pair[0] and handle_label_pair[1] and handle_label_pair[1] != '_nolegend_':
-                lines.append(handle_label_pair[0]); labels.append(handle_label_pair[1])
-        if lines: ax_active.legend(lines, labels, loc='upper left', bbox_to_anchor=(0.01, 0.9), fontsize=9)
+        max_y_bal = max(np.max(detailed_results['history_avg_user_balance']) * 1.2 if detailed_results['history_avg_user_balance'] else 0, final_config['INITIAL_USER_BALANCE_MEAN']*1.5)
+        ax_balances.set_ylim(0, max_y_bal)
+        
+        fig.suptitle(f"User Growth & Dynamics (Sustainable Economy)\nProfit Makers: {profit_percentage:.1f}% | Injection: {final_config['PLATFORM_REWARD_INJECTION_ON_SUCCESS']}", fontsize=14, fontweight='bold')
+        lines = [p1, p3, p4, h_line_initial_bal]
+        labels = [l.get_label() for l in lines]
+        ax_active.legend(lines, labels, loc='upper left', bbox_to_anchor=(0.01, 0.9), fontsize=10)
         ax_active.grid(True, linestyle=':', alpha=0.6); fig.tight_layout(rect=[0, 0.03, 1, 0.90])
         plt.savefig(f"{results_filename_base}_growth_dynamics.png")
-        print(f"Growth dynamics plot saved to: {results_filename_base}_growth_dynamics.png")
+        print(f"\nGrowth dynamics plot saved to: {results_filename_base}_growth_dynamics.png")
         plt.show()
 
-        user_lifespans_data = detailed_results.get("user_lifespans", [])
-        if user_lifespans_data:
-            plt.figure(figsize=(10, 6))
-            plt.hist(user_lifespans_data, bins=min(50, int(final_config['SIMULATION_STEPS']/4)), color='skyblue', edgecolor='black')
-            plt.title('Distribution of User Lifespans', fontsize=14)
-            plt.xlabel('Lifespan (Simulation Steps)', fontsize=12); plt.ylabel('Number of Users', fontsize=12)
-            plt.axvline(np.mean(user_lifespans_data), color='red', linestyle='dashed', linewidth=2, label=f'Mean: {np.mean(user_lifespans_data):.2f}')
-            plt.axvline(np.median(user_lifespans_data), color='green', linestyle='dashed', linewidth=2, label=f'Median: {np.median(user_lifespans_data):.2f}')
-            plt.legend(); plt.grid(axis='y', alpha=0.7); plt.tight_layout()
-            plt.savefig(f"{results_filename_base}_user_lifespans.png")
-            print(f"User lifespan distribution plot saved to: {results_filename_base}_user_lifespans.png")
-            plt.show()
-
-        net_balance_changes_data = detailed_results.get("net_balance_changes", [])
-        if net_balance_changes_data:
-            plt.figure(figsize=(10, 6))
-            initial_balance_mean_for_plot = final_config.get('INITIAL_USER_BALANCE_MEAN', 100) 
-            plt.hist(net_balance_changes_data, bins=50, color='lightcoral', edgecolor='black', range=(-initial_balance_mean_for_plot*1.5, initial_balance_mean_for_plot*3))
-            plt.title('Distribution of Net Balance Change (Final - Initial)', fontsize=14)
-            plt.xlabel('Net Balance Change', fontsize=12); plt.ylabel('Number of Users', fontsize=12)
-            plt.axvline(0, color='black', linestyle='solid', linewidth=1)
-            plt.axvline(np.mean(net_balance_changes_data), color='blue', linestyle='dashed', linewidth=2, label=f'Mean: {np.mean(net_balance_changes_data):.2f}')
-            plt.axvline(np.median(net_balance_changes_data), color='purple', linestyle='dashed', linewidth=2, label=f'Median: {np.median(net_balance_changes_data):.2f}')
-            plt.legend(); plt.grid(axis='y', alpha=0.7); plt.tight_layout()
-            plt.savefig(f"{results_filename_base}_net_balance_changes.png")
-            print(f"Net balance change distribution plot saved to: {results_filename_base}_net_balance_changes.png")
-            plt.show()
-
-        user_join_steps_scatter = detailed_results.get('user_join_steps_for_scatter', [])
-        user_final_balances_scatter = detailed_results.get('user_final_balances_for_scatter', [])
-        user_net_color_scatter = detailed_results.get('user_net_change_for_color_scatter', [])
-        if user_join_steps_scatter and user_final_balances_scatter and len(user_join_steps_scatter) == len(user_final_balances_scatter) and len(user_join_steps_scatter) == len(user_net_color_scatter):
-            plt.figure(figsize=(12, 7))
-            colors_scatter = ['limegreen' if nc > 0 else ('red' if nc < 0 else 'blue') for nc in user_net_color_scatter]
-            plt.scatter(user_join_steps_scatter, user_final_balances_scatter, c=colors_scatter, alpha=0.5, s=12, edgecolors='w', linewidths=0.3)
-            plt.title('Final User Balance vs. User Join Timestep', fontsize=14)
-            plt.xlabel('Join Timestep', fontsize=12); plt.ylabel('Final Balance', fontsize=12)
-            legend_elements = [
-                Line2D([0], [0], marker='o', color='w', label='Profit (Final > Initial)', markerfacecolor='limegreen', markersize=8),
-                Line2D([0], [0], marker='o', color='w', label='Loss (Final < Initial)', markerfacecolor='red', markersize=8),
-                Line2D([0], [0], marker='o', color='w', label='Break Even', markerfacecolor='blue', markersize=8)]
-            initial_bal_mean_val = final_config.get('INITIAL_USER_BALANCE_MEAN', 100)
-            h_line_initial_bal = plt.axhline(y=initial_bal_mean_val, color='gray', linestyle=':', linewidth=1.5, label=f'Avg Initial Balance ({initial_bal_mean_val})')
-            legend_elements.append(h_line_initial_bal)
-            plt.legend(handles=legend_elements, loc='upper right', title="Balance Change Key")
-            plt.grid(True, linestyle=':', alpha=0.6); plt.tight_layout()
-            plt.savefig(f"{results_filename_base}_balance_vs_join_step_colored.png")
-            print(f"Balance vs Join Timestep plot saved to: {results_filename_base}_balance_vs_join_step_colored.png")
-            plt.show()
-        else: print("Missing/mismatched data for scatter plot (final balance vs. start time).")
-    else: print("No history data to plot for the representative run.")
+    # Net Balance Change Plot
+    net_balance_changes_data = detailed_results.get("net_balance_changes", [])
+    if net_balance_changes_data:
+        plt.figure(figsize=(10, 6))
+        plt.hist(net_balance_changes_data, bins=60, color='lightgreen', edgecolor='black')
+        plt.title('Distribution of Net Balance Change (Final - Initial)', fontsize=14)
+        plt.xlabel('Net Balance Change', fontsize=12); plt.ylabel('Number of Users', fontsize=12)
+        plt.axvline(0, color='black', linestyle='solid', linewidth=1.5)
+        plt.axvline(np.mean(net_balance_changes_data), color='blue', linestyle='dashed', linewidth=2, label=f'Mean: {np.mean(net_balance_changes_data):.2f}')
+        plt.legend(); plt.grid(axis='y', alpha=0.7); plt.tight_layout()
+        plt.savefig(f"{results_filename_base}_net_balance_changes.png")
+        print(f"Net balance change distribution plot saved to: {results_filename_base}_net_balance_changes.png")
+        plt.show()
+    
+    # Final Balance vs Join Time Plot
+    user_join_steps_scatter = detailed_results.get('user_join_steps_for_scatter', [])
+    user_final_balances_scatter = detailed_results.get('user_final_balances_for_scatter', [])
+    user_net_color_scatter = detailed_results.get('user_net_change_for_color_scatter', [])
+    if all([user_join_steps_scatter, user_final_balances_scatter, user_net_color_scatter]):
+        plt.figure(figsize=(12, 7))
+        colors_scatter = ['limegreen' if nc > 0 else ('red' if nc < 0 else 'blue') for nc in user_net_color_scatter]
+        plt.scatter(user_join_steps_scatter, user_final_balances_scatter, c=colors_scatter, alpha=0.6, s=15, edgecolors='w', linewidths=0.2)
+        plt.title('Final User Balance vs. User Join Timestep', fontsize=14)
+        plt.xlabel('Join Timestep', fontsize=12); plt.ylabel('Final Balance', fontsize=12)
+        legend_elements = [
+            Line2D([0], [0], marker='o', color='w', label='Profit (Final > Initial)', markerfacecolor='limegreen', markersize=8),
+            Line2D([0], [0], marker='o', color='w', label='Loss (Final < Initial)', markerfacecolor='red', markersize=8)]
+        h_line_initial = plt.axhline(y=final_config['INITIAL_USER_BALANCE_MEAN'], color='gray', linestyle=':', linewidth=1.5, label=f'Avg Initial Balance')
+        legend_elements.append(h_line_initial)
+        plt.legend(handles=legend_elements, loc='upper right', title="Balance Change Key")
+        plt.grid(True, linestyle=':', alpha=0.6); plt.tight_layout()
+        plt.savefig(f"{results_filename_base}_balance_vs_join_step_colored.png")
+        print(f"Balance vs Join Timestep plot saved to: {results_filename_base}_balance_vs_join_step_colored.png")
+        plt.show()
 
     print("\nAnalysis script finished.")
